@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minicraft</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #87ceeb; font-family: system-ui, sans-serif; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #ui { position: fixed; top: 10px; left: 10px; display: flex; flex-direction: column; gap: 6px; width: 190px; }
+  #ui button, #ui label.btn {
+    background: rgba(20,20,20,.75); color: #fff; border: 1px solid #555; border-radius: 4px;
+    padding: 7px 10px; font-size: 13px; cursor: pointer; text-align: center;
+  }
+  #ui button:hover, #ui label.btn:hover { background: rgba(60,60,60,.85); }
+  #ui input[type=file] { display: none; }
+  #help {
+    position: fixed; right: 10px; top: 10px; background: rgba(0,0,0,.6); color: #eee;
+    padding: 10px 14px; border-radius: 4px; font-size: 13px; line-height: 1.5; max-width: 260px;
+  }
+  #help b { color: #ffd54a; }
+  #hud { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); pointer-events: none; }
+  #hearts { display: flex; gap: 2px; margin-bottom: 6px; }
+  .heart {
+    width: 20px; height: 18px; --p: 100%;
+    background: linear-gradient(90deg, #e32 var(--p), #2a2a2a var(--p));
+    -webkit-mask: var(--heart) center / contain no-repeat; mask: var(--heart) center / contain no-repeat;
+    --heart: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 8'%3E%3Cpath d='M1 0h2v1H1zM6 0h2v1H6zM0 1h4v1H0zM5 1h4v1H5zM0 2h9v2H0zM1 4h7v1H1zM2 5h5v1H2zM3 6h3v1H3zM4 7h1v1H4z'/%3E%3C/svg%3E");
+  }
+  #hotbar { display: flex; gap: 3px; padding: 3px; background: rgba(0,0,0,.55); border: 2px solid #222; }
+  .slot { width: 42px; height: 42px; box-sizing: border-box; border: 3px solid #555; background: rgba(90,90,90,.5); position: relative; }
+  .slot.sel { border-color: #fff; background: rgba(140,140,140,.55); }
+  .slot .icon { position: absolute; inset: 6px; border: 1px solid rgba(0,0,0,.6); }
+  .slot .count { position: absolute; right: 2px; bottom: 0; color: #fff; font: bold 13px monospace; text-shadow: 1px 1px #000; }
+  #hurt { position: fixed; inset: 0; background: #d00; opacity: 0; transition: opacity .35s; pointer-events: none; }
+  #status {
+    position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.7); color: #fff; padding: 6px 14px; border-radius: 4px;
+    font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  #cross { position: fixed; top: 50%; left: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+    border: 1px solid rgba(255,255,255,.7); border-radius: 50%; pointer-events: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="ui">
+  <button id="btn-new">New Game</button>
+  <button id="btn-save">Save to Browser</button>
+  <button id="btn-load">Load from Browser</button>
+  <button id="btn-export">Export File</button>
+  <label class="btn">Import File<input id="file-import" type="file" accept=".json,application/json"></label>
+</div>
+<div id="help">
+  <b>Controls</b><br>
+  <b>&uarr; / &darr;</b> move forward / back<br>
+  <b>&larr; / &rarr;</b> turn left / right<br>
+  <b>W A S D</b> (AZERTY: <b>Z Q S D</b>) move / strafe<br>
+  <b>Space</b> jump / swim up<br>
+  <b>PgUp / PgDn</b> look up / down<br>
+  <b>Click canvas</b> mouse look (Esc to release)<br>
+  <b>Hold left click / E</b> mine block<br>
+  <b>Right click / Q</b> place block<br>
+  <b>1-9 / wheel / R</b> select slot
+</div>
+<div id="cross"></div>
+<div id="hurt"></div>
+<div id="hud"><div id="hearts"></div><div id="hotbar"></div></div>
+<div id="status"></div>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- constants ----------
+const SIZE = 64, HEIGHT = 32;
+const AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, WATER = 4, SAND = 5, WOOD = 6, LEAVES = 7;
+const RAW_CHICKEN = 8, RAW_PORKCHOP = 9, RAW_BEEF = 10;   // food items: hotbar-only, never placed in the world
+const MAX_ITEM = RAW_BEEF;                      // highest id a hotbar slot can hold (world blocks + food)
+const SEA = 8;                                  // highest water level (y of top water block)
+const SAVE_KEY = 'minicraft_save', AUTOSAVE_KEY = 'minicraft_autosave', VERSION = 2;
+const MAX_HEALTH = 20, HOTBAR_SIZE = 9, STACK = 64, REACH = 5;   // health in half-hearts
+const HARDNESS = { [GRASS]: 0.5, [DIRT]: 0.5, [SAND]: 0.4, [STONE]: 1.5, [WOOD]: 1, [LEAVES]: 0.2 }; // seconds to mine
+const PW = 0.6, PH = 1.8, EYE = 1.62;           // player width, height, eye height
+const GRAVITY = 28, JUMP_V = 8.5, MOVE_SPEED = 5, TURN_SPEED = 2.2, PITCH_SPEED = 1.5;
+
+// ---------- world state ----------
+let blocks = new Uint8Array(SIZE * SIZE * HEIGHT);
+let seed = 0;
+const idx = (x, y, z) => (y * SIZE + z) * SIZE + x;
+
+function getBlock(x, y, z) {
+  if (x < 0 || z < 0 || x >= SIZE || z >= SIZE || y < 0) return STONE; // world walls/floor
+  if (y >= HEIGHT) return AIR;
+  return blocks[idx(x, y, z)];
+}
+const isSolid = (x, y, z) => { const b = getBlock(x, y, z); return b !== AIR && b !== WATER; };
+
+// ---------- noise (seeded 2D Perlin) ----------
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function makePerlin(s) {
+  const rand = mulberry32(s), p = new Uint8Array(512), perm = [...Array(256).keys()];
+  for (let i = 255; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [perm[i], perm[j]] = [perm[j], perm[i]]; }
+  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+  const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const grad = (h, x, y) => { const u = (h & 2) ? -x : x, v = (h & 1) ? -y : y; return ((h & 4) ? v : u) + ((h & 8) ? u : v) * 0.5; };
+  return (x, y) => {
+    const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+    x -= Math.floor(x); y -= Math.floor(y);
+    const u = fade(x), v = fade(y);
+    const a = p[X] + Y, b = p[X + 1] + Y;
+    return lerp(lerp(grad(p[a], x, y), grad(p[b], x - 1, y), u),
+                lerp(grad(p[a + 1], x, y - 1), grad(p[b + 1], x - 1, y - 1), u), v);
+  };
+}
+
+function generateWorld(s) {
+  seed = s;
+  blocks = new Uint8Array(SIZE * SIZE * HEIGHT);
+  const noise = makePerlin(s);
+  for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
+    let n = 0, amp = 1, freq = 0.04, norm = 0;
+    for (let o = 0; o < 4; o++) { n += noise(x * freq + 100, z * freq + 100) * amp; norm += amp; amp *= 0.5; freq *= 2; }
+    n /= norm;                                         // roughly -0.7..0.7
+    const h = Math.max(2, Math.min(HEIGHT - 4, Math.floor(10 + n * 16)));
+    for (let y = 0; y < h; y++) {
+      blocks[idx(x, y, z)] = y === h - 1 ? (y <= SEA ? SAND : GRASS) : (y >= h - 4 ? DIRT : STONE);
+    }
+    for (let y = h; y <= SEA; y++) blocks[idx(x, y, z)] = WATER;
+  }
+  // trees (own PRNG stream so they are reproducible from the seed)
+  const rand = mulberry32(s ^ 0x9e3779b9), trees = [];
+  for (let z = 2; z < SIZE - 2; z++) for (let x = 2; x < SIZE - 2; x++) {
+    if (rand() > 0.025) continue;
+    const gy = topY(x, z);
+    if (blocks[idx(x, gy, z)] !== GRASS || trees.some(t => Math.abs(t[0] - x) < 4 && Math.abs(t[1] - z) < 4)) continue;
+    const th = 4 + Math.floor(rand() * 2);
+    if (gy + th + 2 >= HEIGHT) continue;
+    trees.push([x, z]);
+    for (let y = 1; y <= th; y++) blocks[idx(x, gy + y, z)] = WOOD;
+    for (let dy = -1; dy <= 1; dy++) {
+      const r = dy === 1 ? 1 : 2;
+      for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+        if (r === 2 && Math.abs(dx) === 2 && Math.abs(dz) === 2) continue;
+        const i = idx(x + dx, gy + th + dy, z + dz);
+        if (blocks[i] === AIR) blocks[i] = LEAVES;
+      }
+    }
+  }
+}
+
+function topY(x, z) { // y of the highest non-air block in a column
+  for (let y = HEIGHT - 1; y >= 0; y--) if (blocks[idx(x, y, z)] !== AIR) return y;
+  return -1;
+}
+
+// ---------- rendering ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb, 20, 70);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+camera.rotation.order = 'YXZ';
+const material = new THREE.MeshBasicMaterial({ vertexColors: true });
+let worldMesh = null;
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// face: neighbor offset, brightness, 4 corners (CCW from outside)
+const FACES = [
+  { d: [1, 0, 0],  b: 0.8, v: [[1,0,1],[1,0,0],[1,1,0],[1,1,1]] },
+  { d: [-1, 0, 0], b: 0.8, v: [[0,0,0],[0,0,1],[0,1,1],[0,1,0]] },
+  { d: [0, 1, 0],  b: 1.0, v: [[0,1,1],[1,1,1],[1,1,0],[0,1,0]] },
+  { d: [0, -1, 0], b: 0.5, v: [[0,0,0],[1,0,0],[1,0,1],[0,0,1]] },
+  { d: [0, 0, 1],  b: 0.9, v: [[0,0,1],[1,0,1],[1,1,1],[0,1,1]] },
+  { d: [0, 0, -1], b: 0.7, v: [[1,0,0],[0,0,0],[0,1,0],[1,1,0]] },
+];
+const COLORS = { // [top, side, bottom]
+  [GRASS]: [[0.30, 0.65, 0.22], [0.45, 0.36, 0.22], [0.45, 0.33, 0.20]],
+  [DIRT]:  [[0.45, 0.33, 0.20], [0.45, 0.33, 0.20], [0.45, 0.33, 0.20]],
+  [STONE]: [[0.50, 0.50, 0.50], [0.50, 0.50, 0.50], [0.50, 0.50, 0.50]],
+  [WATER]: [[0.18, 0.40, 0.80], [0.18, 0.40, 0.80], [0.18, 0.40, 0.80]],
+  [SAND]:  [[0.85, 0.79, 0.50], [0.85, 0.79, 0.50], [0.85, 0.79, 0.50]],
+  [WOOD]:  [[0.45, 0.32, 0.16], [0.40, 0.28, 0.14], [0.45, 0.32, 0.16]],
+  [LEAVES]:[[0.18, 0.50, 0.14], [0.18, 0.50, 0.14], [0.18, 0.50, 0.14]],
+  // food items are hotbar-only (never placed), but still need a hotbar icon color
+  [RAW_CHICKEN]:  [[0.93, 0.86, 0.72], [0.93, 0.86, 0.72], [0.93, 0.86, 0.72]],
+  [RAW_PORKCHOP]: [[0.91, 0.56, 0.56], [0.91, 0.56, 0.56], [0.91, 0.56, 0.56]],
+  [RAW_BEEF]:     [[0.62, 0.14, 0.14], [0.62, 0.14, 0.14], [0.62, 0.14, 0.14]],
+};
+
+const waterMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false });
+let waterMesh = null;
+
+function toGeometry(m) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(m.pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(m.col, 3));
+  g.setIndex(m.ind);
+  g.computeBoundingSphere();
+  return g;
+}
+
+function rebuildMesh() {
+  const solid = { pos: [], col: [], ind: [] }, water = { pos: [], col: [], ind: [] };
+  for (let y = 0; y < HEIGHT; y++) for (let z = 0; z < SIZE; z++) for (let x = 0; x < SIZE; x++) {
+    const t = blocks[idx(x, y, z)];
+    if (t === AIR) continue;
+    const isWater = t === WATER, out = isWater ? water : solid;
+    const dip = isWater && getBlock(x, y + 1, z) === AIR ? 0.1 : 0; // water surface sits slightly low
+    const jitter = 0.92 + 0.16 * ((((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) >>> 0) % 100) / 100;
+    for (let f = 0; f < 6; f++) {
+      const F = FACES[f];
+      // Out-of-bounds neighbors count as solid, so world edges/underside are never drawn.
+      // Solids show faces next to air or water; water only shows faces next to air.
+      const n = getBlock(x + F.d[0], y + F.d[1], z + F.d[2]);
+      if (isWater ? n !== AIR : (n !== AIR && n !== WATER)) continue;
+      const c = COLORS[t][f === 2 ? 0 : f === 3 ? 2 : 1], k = F.b * jitter;
+      const base = out.pos.length / 3;
+      for (const v of F.v) {
+        out.pos.push(x + v[0], y + v[1] - (v[1] === 1 ? dip : 0), z + v[2]);
+        out.col.push(c[0] * k, c[1] * k, c[2] * k);
+      }
+      out.ind.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  for (const m of [worldMesh, waterMesh]) if (m) { scene.remove(m); m.geometry.dispose(); }
+  worldMesh = new THREE.Mesh(toGeometry(solid), material);
+  waterMesh = new THREE.Mesh(toGeometry(water), waterMaterial);
+  waterMesh.renderOrder = 1;
+  scene.add(worldMesh, waterMesh);
+}
+
+// ---------- sky: sun, moon, clouds, day/night cycle ----------
+const DAY_SECONDS = 24 * 60;        // 1 real minute = 1 game hour, so a full day/night lap takes 24 real minutes
+const SKY_AXIS = new THREE.Vector3(0.6, 0, -0.8);   // unit horizon point the sun rises/sets through; the great circle through it and straight up is the sun's path
+const sunDir = new THREE.Vector3(), moonDir = new THREE.Vector3();   // moonDir is always -sunDir, so the moon is up exactly when the sun isn't
+const SKY_DAY = new THREE.Color(0x87ceeb), SKY_DUSK = new THREE.Color(0xff8f5c), SKY_NIGHT = new THREE.Color(0x060a1c);
+const WATER_DAY = new THREE.Color(0x1a3a70), WATER_NIGHT = new THREE.Color(0x050a18);
+const skyColor = new THREE.Color();
+const NIGHT_BRIGHTNESS = 0.32, DAY_FOG_FAR = 70, NIGHT_FOG_FAR = 42;
+let worldBrightness = 1;   // set by updateSky, read by updateAnimals to keep animals in step with the terrain
+
+function makeDisc(size, color, order) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(size, size),
+    new THREE.MeshBasicMaterial({ color, fog: false, depthTest: false, depthWrite: false }));
+  m.renderOrder = order;
+  scene.add(m);
+  return m;
+}
+const sunLayers = [[34, 0xffe566, -11], [22, 0xfffbd0, -10]].map(([s, c, o]) => makeDisc(s, c, o));
+const moonLayers = [[26, 0xcfd7e6, -11], [16, 0xeef1fa, -10]].map(([s, c, o]) => makeDisc(s, c, o));
+
+const CLOUD_CELLS = 24, CLOUD_CELL = 5, CLOUD_THICK = 2, CLOUD_Y = HEIGHT + 12;
+const CLOUD_TILE = CLOUD_CELLS * CLOUD_CELL;
+const cloudCopies = (() => { // one merged, wrap-around tile; 3x3 copies follow the player
+  const rand = mulberry32(777), grid = new Uint8Array(CLOUD_CELLS * CLOUD_CELLS);
+  const wrap = n => (n + CLOUD_CELLS) % CLOUD_CELLS;
+  for (let b = 0; b < 16; b++) {
+    const cx = rand() * CLOUD_CELLS, cz = rand() * CLOUD_CELLS, rx = 1.5 + rand() * 3, rz = 1 + rand() * 2;
+    for (let dz = -5; dz <= 5; dz++) for (let dx = -5; dx <= 5; dx++)
+      if ((dx / rx) ** 2 + (dz / rz) ** 2 <= 1) grid[wrap(Math.round(cz) + dz) * CLOUD_CELLS + wrap(Math.round(cx) + dx)] = 1;
+  }
+  const m = { pos: [], col: [], ind: [] };
+  for (let cz = 0; cz < CLOUD_CELLS; cz++) for (let cx = 0; cx < CLOUD_CELLS; cx++) {
+    if (!grid[cz * CLOUD_CELLS + cx]) continue;
+    for (const F of FACES) {
+      if (F.d[1] === 0 && grid[wrap(cz + F.d[2]) * CLOUD_CELLS + wrap(cx + F.d[0])]) continue;
+      const k = 0.6 + 0.4 * F.b, base = m.pos.length / 3;
+      for (const v of F.v) {
+        m.pos.push((cx + v[0]) * CLOUD_CELL, v[1] * CLOUD_THICK, (cz + v[2]) * CLOUD_CELL);
+        m.col.push(k, k, k);
+      }
+      m.ind.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  const geo = toGeometry(m), mat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
+  const copies = [];
+  for (let i = 0; i < 9; i++) { const c = new THREE.Mesh(geo, mat); c.frustumCulled = false; scene.add(c); copies.push(c); }
+  return copies;
+})();
+
+function updateSky(t, underwater) {
+  const angle = ((t % DAY_SECONDS) / DAY_SECONDS) * Math.PI * 2;   // one full lap of the sky per in-game day
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  sunDir.set(SKY_AXIS.x * cosA, sinA, SKY_AXIS.z * cosA);
+  moonDir.set(-sunDir.x, -sunDir.y, -sunDir.z);
+
+  for (const s of sunLayers) {
+    s.visible = !underwater && sunDir.y > 0;
+    s.position.copy(camera.position).addScaledVector(sunDir, 150);
+    s.lookAt(camera.position);
+  }
+  for (const m of moonLayers) {
+    m.visible = !underwater && moonDir.y > 0;
+    m.position.copy(camera.position).addScaledVector(moonDir, 150);
+    m.lookAt(camera.position);
+  }
+
+  // sky/fog/underwater color follow how high the sun sits: night <-> dusk <-> day
+  const daylight = THREE.MathUtils.clamp((sunDir.y + 0.2) / 0.6, 0, 1);   // 0 at night, 1 once the sun is well up
+  if (underwater) skyColor.copy(WATER_NIGHT).lerp(WATER_DAY, daylight);
+  else if (sunDir.y <= -0.2) skyColor.copy(SKY_NIGHT);
+  else if (sunDir.y >= 0.4) skyColor.copy(SKY_DAY);
+  else if (sunDir.y < 0.1) skyColor.copy(SKY_NIGHT).lerp(SKY_DUSK, (sunDir.y + 0.2) / 0.3);
+  else skyColor.copy(SKY_DUSK).lerp(SKY_DAY, (sunDir.y - 0.1) / 0.3);
+  scene.background.copy(skyColor);
+  scene.fog.color.copy(skyColor);
+  scene.fog.near = underwater ? 0.5 : 20;
+  scene.fog.far = underwater ? 12 : NIGHT_FOG_FAR + (DAY_FOG_FAR - NIGHT_FOG_FAR) * daylight;   // see less far at night
+
+  // dim the world (terrain, water, clouds, animals) at night; MeshBasicMaterial multiplies vertex colors by material.color,
+  // so this darkens the baked-shading geometry without rebuilding it
+  worldBrightness = NIGHT_BRIGHTNESS + (1 - NIGHT_BRIGHTNESS) * daylight;
+  material.color.setScalar(worldBrightness);
+  waterMaterial.color.setScalar(worldBrightness);
+  cloudCopies[0].material.color.setScalar(worldBrightness);
+
+  const drift = (t * 1.5) % CLOUD_TILE;
+  const bx = Math.floor((camera.position.x - drift) / CLOUD_TILE), bz = Math.floor(camera.position.z / CLOUD_TILE);
+  cloudCopies.forEach((c, i) => {
+    c.position.set((bx + (i % 3) - 1) * CLOUD_TILE + drift, CLOUD_Y, (bz + Math.floor(i / 3) - 1) * CLOUD_TILE);
+  });
+}
+
+// ---------- sound (synthesized noise bursts; no audio assets, zero build dependencies) ----------
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const noiseBuffer = (() => {   // one shared buffer of white noise; each sound just filters/gates a slice of it
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.3, audioCtx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  return buf;
+})();
+// per-material noise-burst recipe: bandpass center frequency, Q, decay (s); `tone` layers a short knock for wood
+const BLOCK_SOUND = {
+  [GRASS]: { freq: 500, q: 1, decay: 0.12 }, [DIRT]: { freq: 350, q: 1, decay: 0.14 },
+  [STONE]: { freq: 900, q: 2.5, decay: 0.18 }, [SAND]: { freq: 1500, q: 0.7, decay: 0.1 },
+  [WOOD]: { freq: 300, q: 1.5, decay: 0.16, tone: 180 }, [LEAVES]: { freq: 2800, q: 0.6, decay: 0.08 },
+};
+const ANIMAL_SOUND = { freq: 1700, q: 2, decay: 0.12 };
+
+function playSound(s) {
+  if (audioCtx.state === 'suspended') audioCtx.resume();   // first play is always from a user gesture (click/key)
+  const t0 = audioCtx.currentTime;
+  const src = audioCtx.createBufferSource(), filter = audioCtx.createBiquadFilter(), gain = audioCtx.createGain();
+  src.buffer = noiseBuffer;
+  filter.type = 'bandpass'; filter.frequency.value = s.freq; filter.Q.value = s.q;
+  gain.gain.setValueAtTime(0.5, t0); gain.gain.exponentialRampToValueAtTime(0.001, t0 + s.decay);
+  src.connect(filter).connect(gain).connect(audioCtx.destination);
+  src.start(t0); src.stop(t0 + s.decay);
+  if (s.tone) {
+    const osc = audioCtx.createOscillator(), og = audioCtx.createGain();
+    osc.type = 'triangle'; osc.frequency.value = s.tone;
+    og.gain.setValueAtTime(0.3, t0); og.gain.exponentialRampToValueAtTime(0.001, t0 + s.decay);
+    osc.connect(og).connect(audioCtx.destination); osc.start(t0); osc.stop(t0 + s.decay);
+  }
+}
+const playBreakSound = id => playSound(BLOCK_SOUND[id] || BLOCK_SOUND[STONE]);
+
+// ---------- block targeting / mining / inventory ----------
+const dirVec = new THREE.Vector3();
+let target = null, mining = null;       // target: {x,y,z,nx,ny,nz,t}; mining: {x,y,z,t}
+let miningAnimal = null, animalHitT = 0;   // an animal in the crosshair, if any, takes priority over the block behind it
+const hotbar = Array.from({ length: HOTBAR_SIZE }, () => ({ id: AIR, count: 0 }));
+let selected = 0;
+
+const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.004, 1.004, 1.004)),
+  new THREE.LineBasicMaterial({ color: 0x000000 }));
+const crack = new THREE.Mesh(new THREE.BoxGeometry(1.01, 1.01, 1.01),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0, depthWrite: false }));
+outline.visible = crack.visible = false;
+scene.add(outline, crack);
+
+// Voxel DDA: first non-air, non-water block within `maxDist`, plus the face normal we entered through.
+function raycast(o, d, maxDist) {
+  let x = Math.floor(o.x), y = Math.floor(o.y), z = Math.floor(o.z), nx = 0, ny = 0, nz = 0, t = 0;
+  const sx = Math.sign(d.x), sy = Math.sign(d.y), sz = Math.sign(d.z);
+  const dx = sx ? Math.abs(1 / d.x) : Infinity, dy = sy ? Math.abs(1 / d.y) : Infinity, dz = sz ? Math.abs(1 / d.z) : Infinity;
+  let mx = sx > 0 ? (x + 1 - o.x) * dx : sx < 0 ? (o.x - x) * dx : Infinity;
+  let my = sy > 0 ? (y + 1 - o.y) * dy : sy < 0 ? (o.y - y) * dy : Infinity;
+  let mz = sz > 0 ? (z + 1 - o.z) * dz : sz < 0 ? (o.z - z) * dz : Infinity;
+  while (t <= maxDist) {
+    if (x >= 0 && z >= 0 && x < SIZE && z < SIZE && y >= 0 && y < HEIGHT) {
+      const b = blocks[idx(x, y, z)];
+      if (b !== AIR && b !== WATER) return { x, y, z, nx, ny, nz, t };
+    }
+    if (mx < my && mx < mz) { x += sx; t = mx; mx += dx; nx = -sx; ny = 0; nz = 0; }
+    else if (my < mz) { y += sy; t = my; my += dy; nx = 0; ny = -sy; nz = 0; }
+    else { z += sz; t = mz; mz += dz; nx = 0; ny = 0; nz = -sz; }
+  }
+  return null;
+}
+
+function addItem(id) {
+  const slot = hotbar.find(s => s.id === id && s.count < STACK) || hotbar.find(s => s.count === 0);
+  if (!slot) return false;
+  slot.id = id; slot.count++;
+  renderHotbar();
+  return true;
+}
+
+const NEIGHBORS6 = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+function breakBlock(x, y, z) {
+  const id = blocks[idx(x, y, z)];
+  // water next to the broken block (on any side, including above) flows in and fills the hole
+  const flood = NEIGHBORS6.some(([dx, dy, dz]) => getBlock(x + dx, y + dy, z + dz) === WATER);
+  blocks[idx(x, y, z)] = flood ? WATER : AIR;
+  playBreakSound(id);
+  if (!addItem(id === GRASS ? DIRT : id)) status('Hotbar full');
+  rebuildMesh();
+}
+
+function placeBlock() {
+  const slot = hotbar[selected];
+  if (!target || slot.count <= 0 || slot.id > LEAVES) return;   // food can't be placed as a block
+  const x = target.x + target.nx, y = target.y + target.ny, z = target.z + target.nz;
+  if (x < 0 || z < 0 || x >= SIZE || z >= SIZE || y < 0 || y >= HEIGHT) return;
+  const i = idx(x, y, z), prev = blocks[i];
+  if (prev !== AIR && prev !== WATER) return;
+  blocks[i] = slot.id;
+  if (collides(player.x, player.y, player.z)) { blocks[i] = prev; return; } // don't entomb the player
+  if (--slot.count === 0) slot.id = AIR;
+  rebuildMesh();
+  renderHotbar();
+}
+
+function updateMining(dt) {
+  camera.getWorldDirection(dirVec);
+  target = raycast(camera.position, dirVec, REACH);
+
+  // an animal standing in front of the crosshair takes priority over the block behind it
+  let animalTarget = null, bestT = target ? target.t : REACH;
+  for (const a of animals) {
+    const t = rayBoxDist(camera.position, dirVec, a);
+    if (t < bestT) { bestT = t; animalTarget = a; }
+  }
+
+  if (animalTarget) {
+    target = null; mining = null;
+    if (mouse.left || keys.KeyE) {
+      if (miningAnimal !== animalTarget) { miningAnimal = animalTarget; animalHitT = 0; }
+      animalHitT += dt / animalTarget.def.killTime;
+      if (animalHitT >= 1) { killAnimal(animalTarget); miningAnimal = null; animalHitT = 0; animalTarget = null; }
+    } else { miningAnimal = null; animalHitT = 0; }
+  } else if (target && target.y > 0 && (mouse.left || keys.KeyE)) {   // y=0 is unbreakable bedrock
+    miningAnimal = null; animalHitT = 0;
+    if (!mining || mining.x !== target.x || mining.y !== target.y || mining.z !== target.z)
+      mining = { x: target.x, y: target.y, z: target.z, t: 0 };
+    mining.t += dt / HARDNESS[blocks[idx(target.x, target.y, target.z)]];
+    if (mining.t >= 1) { breakBlock(mining.x, mining.y, mining.z); mining = null; }
+  } else { mining = null; miningAnimal = null; animalHitT = 0; }
+
+  outline.visible = !!target || !!animalTarget;
+  if (target) { outline.scale.set(1, 1, 1); outline.position.set(target.x + 0.5, target.y + 0.5, target.z + 0.5); }
+  else if (animalTarget) {
+    outline.scale.set(animalTarget.def.w, animalTarget.def.h, animalTarget.def.w);
+    outline.position.set(animalTarget.x, animalTarget.y + animalTarget.def.h / 2, animalTarget.z);
+  }
+  crack.visible = !!mining || !!miningAnimal;
+  if (mining) {
+    crack.scale.set(1, 1, 1);
+    crack.position.set(mining.x + 0.5, mining.y + 0.5, mining.z + 0.5); crack.material.opacity = mining.t * 0.65;
+  } else if (miningAnimal) {
+    crack.scale.set(miningAnimal.def.w, miningAnimal.def.h, miningAnimal.def.w);
+    crack.position.set(miningAnimal.x, miningAnimal.y + miningAnimal.def.h / 2, miningAnimal.z);
+    crack.material.opacity = animalHitT * 0.65;
+  }
+}
+
+// ---------- HUD ----------
+const heartsEl = document.getElementById('hearts'), hotbarEl = document.getElementById('hotbar'), hurtEl = document.getElementById('hurt');
+for (let i = 0; i < MAX_HEALTH / 2; i++) { const h = document.createElement('div'); h.className = 'heart'; heartsEl.append(h); }
+for (let i = 0; i < HOTBAR_SIZE; i++) {
+  const s = document.createElement('div'); s.className = 'slot';
+  s.innerHTML = '<div class="icon"></div><div class="count"></div>';
+  hotbarEl.append(s);
+}
+const css = c => `rgb(${c.map(v => Math.round(v * 255))})`;
+
+function renderHearts() {
+  [...heartsEl.children].forEach((h, i) => h.style.setProperty('--p', Math.max(0, Math.min(1, (player.health - i * 2) / 2)) * 100 + '%'));
+}
+function renderHotbar() {
+  [...hotbarEl.children].forEach((s, i) => {
+    const { id, count } = hotbar[i], icon = s.firstChild;
+    s.classList.toggle('sel', i === selected);
+    icon.style.visibility = count ? 'visible' : 'hidden';
+    if (count) icon.style.background = `linear-gradient(${css(COLORS[id][0])} 30%, ${css(COLORS[id][1])} 30%)`;
+    s.lastChild.textContent = count > 1 ? count : '';
+  });
+}
+function selectSlot(i) { selected = i; renderHotbar(); }
+
+// ---------- player ----------
+const player = { x: 0, y: 0, z: 0, vy: 0, yaw: 0, pitch: 0, onGround: false, fallY: 0, health: MAX_HEALTH };
+
+function damage(n) {
+  player.health = Math.max(0, player.health - n);
+  renderHearts();
+  hurtEl.style.transition = 'none'; hurtEl.style.opacity = 0.35;
+  requestAnimationFrame(() => { hurtEl.style.transition = 'opacity .35s'; hurtEl.style.opacity = 0; });
+  if (player.health === 0) {
+    spawnPlayer();
+    player.health = MAX_HEALTH;
+    renderHearts();
+    status('You died! Respawned');
+  }
+}
+
+function spawnPlayer() {
+  // nearest dry grass/sand column to the map center (not water, not a treetop)
+  const c = SIZE >> 1;
+  let cx = c, cz = c;
+  search: for (let r = 0; r < SIZE; r++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+    const x = c + dx, z = c + dz;
+    if (x < 0 || z < 0 || x >= SIZE || z >= SIZE) continue;
+    const t = blocks[idx(x, topY(x, z), z)];
+    if (t === GRASS || t === SAND) { cx = x; cz = z; break search; }
+  }
+  player.x = cx + 0.5; player.z = cz + 0.5; player.y = topY(cx, cz) + 1.01;
+  player.vy = 0; player.yaw = 0; player.pitch = -0.2; player.fallY = player.y;
+}
+
+function collides(px, py, pz, w = PW, h = PH) {
+  const x0 = Math.floor(px - w / 2), x1 = Math.floor(px + w / 2);
+  const y0 = Math.floor(py), y1 = Math.floor(py + h);
+  const z0 = Math.floor(pz - w / 2), z1 = Math.floor(pz + w / 2);
+  for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++)
+    if (isSolid(x, y, z)) return true;
+  return false;
+}
+
+function updatePlayer(dt) {
+  // turning / pitch
+  if (keys.ArrowLeft) player.yaw += TURN_SPEED * dt;
+  if (keys.ArrowRight) player.yaw -= TURN_SPEED * dt;
+  if (keys.PageUp) player.pitch += PITCH_SPEED * dt;
+  if (keys.PageDown) player.pitch -= PITCH_SPEED * dt;
+  player.pitch = Math.max(-1.5, Math.min(1.5, player.pitch));
+
+  let f = 0, s = 0;
+  if (keys.ArrowUp || keys.KeyW) f += 1;   // KeyW/KeyA/KeyS/KeyD are physical keys: ZQSD on AZERTY
+  if (keys.ArrowDown || keys.KeyS) f -= 1;
+  if (keys.KeyD) s += 1;
+  if (keys.KeyA) s -= 1;
+  const inWater = getBlock(Math.floor(player.x), Math.floor(player.y + 0.6), Math.floor(player.z)) === WATER;
+  const speed = MOVE_SPEED * (inWater ? 0.6 : 1);
+  const sin = Math.sin(player.yaw), cos = Math.cos(player.yaw);
+  let dx = (-sin * f + cos * s) * speed * dt;
+  let dz = (-cos * f - sin * s) * speed * dt;
+
+  if (!collides(player.x + dx, player.y, player.z)) player.x += dx;
+  if (!collides(player.x, player.y, player.z + dz)) player.z += dz;
+
+  if (inWater) {                                   // swim: Space rises, otherwise slowly sink
+    player.vy = keys.Space ? 6 : Math.max(player.vy - 6 * dt, -3);
+    player.onGround = false;
+  } else {
+    if (keys.Space && player.onGround) { player.vy = JUMP_V; player.onGround = false; }
+    player.vy -= GRAVITY * dt;
+  }
+  player.fallY = (inWater || player.onGround) ? player.y : Math.max(player.fallY, player.y);
+  const ny = player.y + player.vy * dt;
+  let fallDmg = 0;
+  if (!collides(player.x, ny, player.z)) { player.y = ny; player.onGround = false; }
+  else {
+    if (player.vy < 0) { // snap to block top
+      if (!inWater) fallDmg = Math.ceil(player.fallY - player.y - 3); // safe up to 3 blocks, then half a heart per block
+      player.y = Math.floor(player.y); player.onGround = true; player.fallY = player.y;
+    }
+    player.vy = 0;
+  }
+  if (fallDmg > 0) damage(fallDmg);
+  if (player.y < -20) spawnPlayer(); // safety net
+
+  camera.position.set(player.x, player.y + EYE, player.z);
+  camera.rotation.set(player.pitch, player.yaw, 0);
+
+  const under = getBlock(Math.floor(player.x), Math.floor(player.y + EYE), Math.floor(player.z)) === WATER;
+  updateSky(performance.now() / 1000, under);
+}
+
+// ---------- animals (chickens, pigs, cows) ----------
+// Not saved: a fresh herd is spawned whenever a world is generated or loaded. Each animal is a small Group of boxes.
+// Parts: [sx, sy, sz, px, py, pz, color], relative to the feet; the animal faces -z like the camera.
+const ANIMALS = {
+  chicken: { count: 5, w: 0.4, h: 0.7, speed: 1.0, killTime: 0.4, food: RAW_CHICKEN, parts: [
+    [0.3, 0.3, 0.4, 0, 0.4, 0, 0xffffff], [0.18, 0.2, 0.18, 0, 0.65, -0.2, 0xffffff],
+    [0.08, 0.06, 0.1, 0, 0.62, -0.33, 0xf5b800], [0.04, 0.08, 0.1, 0, 0.79, -0.2, 0xd62020],
+    [0.05, 0.2, 0.05, -0.07, 0.1, 0, 0xf5b800], [0.05, 0.2, 0.05, 0.07, 0.1, 0, 0xf5b800]] },
+  pig: { count: 4, w: 0.8, h: 0.9, speed: 1.2, killTime: 0.6, food: RAW_PORKCHOP, parts: [
+    [0.6, 0.5, 0.9, 0, 0.55, 0, 0xf0a0a8], [0.45, 0.4, 0.4, 0, 0.65, -0.62, 0xf0a0a8],
+    [0.25, 0.18, 0.1, 0, 0.58, -0.87, 0xd9777f],
+    [0.18, 0.3, 0.18, -0.2, 0.15, -0.3, 0xe8909a], [0.18, 0.3, 0.18, 0.2, 0.15, -0.3, 0xe8909a],
+    [0.18, 0.3, 0.18, -0.2, 0.15, 0.3, 0xe8909a], [0.18, 0.3, 0.18, 0.2, 0.15, 0.3, 0xe8909a]] },
+  cow: { count: 4, w: 0.9, h: 1.4, speed: 1.0, killTime: 0.9, food: RAW_BEEF, parts: [
+    [0.7, 0.7, 1.1, 0, 0.95, 0, 0x5a3a24], [0.72, 0.3, 0.4, 0, 1.1, 0.15, 0xf2f2f2],
+    [0.5, 0.5, 0.45, 0, 1.25, -0.8, 0x5a3a24], [0.3, 0.2, 0.1, 0, 1.15, -1.05, 0xe8d0c0],
+    [0.2, 0.6, 0.2, -0.22, 0.3, -0.4, 0x3e2716], [0.2, 0.6, 0.2, 0.22, 0.3, -0.4, 0x3e2716],
+    [0.2, 0.6, 0.2, -0.22, 0.3, 0.4, 0x3e2716], [0.2, 0.6, 0.2, 0.22, 0.3, 0.4, 0x3e2716]] },
+};
+const ANIMAL_GRAVITY = 25, ANIMAL_JUMP = 7.5;
+let animals = [];
+
+// Ray-vs-AABB slab test for picking an animal to attack; returns the entry distance along `d`, or Infinity for a miss.
+function rayBoxDist(o, d, a) {
+  const { w, h } = a.def;
+  const bounds = [[a.x - w / 2, a.x + w / 2], [a.y, a.y + h], [a.z - w / 2, a.z + w / 2]];
+  const comps = [[o.x, d.x], [o.y, d.y], [o.z, d.z]];
+  let tmin = 0, tmax = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const [oc, dc] = comps[i], [b0, b1] = bounds[i];
+    if (Math.abs(dc) < 1e-9) { if (oc < b0 || oc > b1) return Infinity; continue; }
+    let t0 = (b0 - oc) / dc, t1 = (b1 - oc) / dc;
+    if (t0 > t1) [t0, t1] = [t1, t0];
+    tmin = Math.max(tmin, t0); tmax = Math.min(tmax, t1);
+    if (tmin > tmax) return Infinity;
+  }
+  return tmin;
+}
+
+function killAnimal(a) {
+  scene.remove(a.group);
+  a.group.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+  animals.splice(animals.indexOf(a), 1);
+  playSound(ANIMAL_SOUND);
+  if (!addItem(a.def.food)) status('Hotbar full');
+}
+
+function makeAnimal(type, x, z) {
+  const def = ANIMALS[type], group = new THREE.Group();
+  for (const [sx, sy, sz, px, py, pz, color] of def.parts) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), new THREE.MeshBasicMaterial({ color }));
+    m.position.set(px, py, pz);
+    m.userData.baseColor = new THREE.Color(color);   // material.color gets scaled by worldBrightness each frame
+    group.add(m);
+  }
+  scene.add(group);
+  return { def, group, x, y: topY(Math.floor(x), Math.floor(z)) + 1.01, z, vy: 0, yaw: Math.random() * Math.PI * 2, walking: false, timer: Math.random() * 2 };
+}
+
+function clearAnimals() {
+  for (const a of animals) {
+    scene.remove(a.group);
+    a.group.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+  }
+  animals = [];
+}
+
+function spawnAnimals() {
+  clearAnimals();
+  for (const type in ANIMALS) {
+    for (let n = 0, tries = 0; n < ANIMALS[type].count && tries < 200; tries++) {
+      const x = Math.floor(Math.random() * SIZE), z = Math.floor(Math.random() * SIZE), y = topY(x, z);
+      if (y < 0 || y + 2 >= HEIGHT || blocks[idx(x, y, z)] !== GRASS || blocks[idx(x, y + 1, z)] !== AIR) continue;
+      if (Math.hypot(x + 0.5 - player.x, z + 0.5 - player.z) < 3) continue;   // not on top of the player
+      animals.push(makeAnimal(type, x + 0.5, z + 0.5));
+      n++;
+    }
+  }
+}
+
+function updateAnimals(dt) {
+  for (const a of animals) {
+    const { w, h, speed } = a.def;
+    if ((a.timer -= dt) <= 0) {                    // alternate between standing still and wandering in a random direction
+      a.walking = !a.walking;
+      if (a.walking) a.yaw = Math.random() * Math.PI * 2;
+      a.timer = a.walking ? 1 + Math.random() * 2.5 : 1 + Math.random() * 3;
+    }
+    if (a.walking) {
+      const dx = -Math.sin(a.yaw) * speed * dt, dz = -Math.cos(a.yaw) * speed * dt;
+      const wet = (x, z) => getBlock(Math.floor(x), Math.floor(a.y), Math.floor(z)) === WATER;
+      let blocked = false;
+      if (wet(a.x + dx * 4, a.z + dz * 4)) blocked = true;                           // don't wade into water
+      else {
+        if (!collides(a.x + dx, a.y, a.z, w, h)) a.x += dx; else blocked = true;
+        if (!collides(a.x, a.y, a.z + dz, w, h)) a.z += dz; else blocked = true;
+      }
+      if (blocked) {
+        if (a.onGround && !collides(a.x + dx * 4, a.y + 1, a.z + dz * 4, w, h) && !wet(a.x + dx * 4, a.z + dz * 4)) a.vy = ANIMAL_JUMP; // hop up a block
+        else { a.yaw = Math.random() * Math.PI * 2; }
+      }
+    }
+    a.vy -= ANIMAL_GRAVITY * dt;
+    const ny = a.y + a.vy * dt;
+    if (!collides(a.x, ny, a.z, w, h)) { a.y = ny; a.onGround = false; }
+    else { if (a.vy < 0) { a.y = Math.floor(a.y); a.onGround = true; } a.vy = 0; }
+    if (a.y < -20) a.y = topY(Math.floor(a.x), Math.floor(a.z)) + 1.01;
+    a.group.position.set(a.x, a.y, a.z);
+    a.group.rotation.y = a.yaw;
+    for (const part of a.group.children) part.material.color.copy(part.userData.baseColor).multiplyScalar(worldBrightness);   // keep in step with night darkening
+  }
+}
+
+// ---------- input ----------
+const keys = {};
+const PREVENT = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'PageUp', 'PageDown']);
+const mouse = { left: false };
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (PREVENT.has(e.code)) e.preventDefault();
+  if (e.repeat) return;
+  if (e.code === 'KeyQ') placeBlock();
+  else if (e.code === 'KeyR') selectSlot((selected + 1) % HOTBAR_SIZE);
+  else if (/^Digit[1-9]$/.test(e.code)) selectSlot(+e.code.slice(5) - 1);
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.left = false; });
+
+const locked = () => document.pointerLockElement === renderer.domElement;
+renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock?.());
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('mousedown', e => {
+  if (!locked()) return;
+  if (e.button === 0) mouse.left = true; else if (e.button === 2) placeBlock();
+});
+document.addEventListener('mouseup', e => { if (e.button === 0) mouse.left = false; });
+document.addEventListener('pointerlockchange', () => { if (!locked()) mouse.left = false; });
+document.addEventListener('wheel', e => {
+  if (locked() && e.deltaY) selectSlot((selected + Math.sign(e.deltaY) + HOTBAR_SIZE) % HOTBAR_SIZE);
+});
+document.addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  player.yaw -= e.movementX * 0.0025;
+  player.pitch = Math.max(-1.5, Math.min(1.5, player.pitch - e.movementY * 0.0025));
+});
+
+// ---------- persistence ----------
+function encodeRLE(arr) {
+  const out = [];
+  let cur = arr[0], n = 1;
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i] === cur) n++; else { out.push(cur, n); cur = arr[i]; n = 1; }
+  }
+  out.push(cur, n);
+  return out;
+}
+
+function serialize() {
+  return {
+    version: VERSION, seed, size: SIZE, height: HEIGHT,
+    player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch },
+    health: player.health,
+    hotbar: hotbar.flatMap(s => [s.id, s.count]),   // [id, count, ...] per slot
+    selected,
+    blocks: encodeRLE(blocks),
+  };
+}
+
+// Validates fully before mutating any game state; throws on bad data.
+function applySave(data) {
+  if (!data || typeof data !== 'object') throw new Error('Not a save file');
+  if (data.version !== 1 && data.version !== VERSION) throw new Error('Unsupported save version');
+  if (data.size !== SIZE || data.height !== HEIGHT) throw new Error('World size mismatch');
+  const rle = data.blocks, p = data.player;
+  if (!Array.isArray(rle) || rle.length % 2) throw new Error('Corrupt block data');
+  const grid = new Uint8Array(SIZE * SIZE * HEIGHT);
+  let i = 0;
+  for (let r = 0; r < rle.length; r += 2) {
+    const id = rle[r], n = rle[r + 1];
+    if (!Number.isInteger(id) || id < 0 || id > LEAVES || !Number.isInteger(n) || n < 1 || i + n > grid.length)
+      throw new Error('Corrupt block data');
+    grid.fill(id, i, i + n); i += n;
+  }
+  if (i !== grid.length) throw new Error('Corrupt block data');
+  if (!p || ![p.x, p.y, p.z, p.yaw, p.pitch].every(Number.isFinite)) throw new Error('Corrupt player data');
+
+  let health = MAX_HEALTH, slots = hotbar.map(() => ({ id: AIR, count: 0 })), sel = 0;
+  if (data.version >= 2) {                         // v1 saves have no health/inventory: start full and empty
+    const hb = data.hotbar;
+    health = data.health; sel = data.selected;
+    if (!Number.isInteger(health) || health < 1 || health > MAX_HEALTH) throw new Error('Corrupt health data');
+    if (!Number.isInteger(sel) || sel < 0 || sel >= HOTBAR_SIZE) throw new Error('Corrupt hotbar data');
+    if (!Array.isArray(hb) || hb.length !== HOTBAR_SIZE * 2) throw new Error('Corrupt hotbar data');
+    slots = slots.map((_, i) => {
+      const id = hb[i * 2], count = hb[i * 2 + 1];
+      if (!Number.isInteger(id) || !Number.isInteger(count) || count < 0 || count > STACK ||
+          (count > 0 && (id < 1 || id > MAX_ITEM || id === WATER))) throw new Error('Corrupt hotbar data');
+      return { id: count ? id : AIR, count };
+    });
+  }
+
+  blocks = grid;
+  seed = Number.isFinite(data.seed) ? data.seed : 0;
+  Object.assign(player, { x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, vy: 0, onGround: false, fallY: p.y, health });
+  slots.forEach((s, i) => Object.assign(hotbar[i], s));
+  selected = sel;
+  if (collides(player.x, player.y, player.z)) spawnPlayer();
+  rebuildMesh();
+  spawnAnimals();
+  renderHearts(); renderHotbar();
+}
+
+let statusTimer;
+function status(msg) {
+  const el = document.getElementById('status');
+  el.textContent = msg; el.style.opacity = 1;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => el.style.opacity = 0, 2500);
+}
+
+function saveTo(key) {
+  try { localStorage.setItem(key, JSON.stringify(serialize())); return true; }
+  catch (e) { status('Save failed: ' + e.message); return false; }
+}
+function loadFrom(key) {
+  let raw;
+  try { raw = localStorage.getItem(key); } catch (e) { status('Storage unavailable'); return false; }
+  if (!raw) return false;
+  try { applySave(JSON.parse(raw)); return true; }
+  catch (e) { status('Load failed: ' + e.message); return false; }
+}
+
+function newGame() {
+  generateWorld((Math.random() * 0xffffffff) >>> 0);
+  spawnPlayer();
+  player.health = MAX_HEALTH;
+  hotbar.forEach(s => { s.id = AIR; s.count = 0; });
+  selected = 0;
+  rebuildMesh();
+  spawnAnimals();
+  renderHearts(); renderHotbar();
+}
+
+document.getElementById('btn-new').onclick = () => { newGame(); status('New world, seed ' + seed); };
+document.getElementById('btn-save').onclick = () => { if (saveTo(SAVE_KEY)) status('Saved to browser'); };
+document.getElementById('btn-load').onclick = () => {
+  if (loadFrom(SAVE_KEY)) status('Loaded from browser');
+  else if (!localStorage.getItem(SAVE_KEY)) status('No saved game found');
+};
+document.getElementById('btn-export').onclick = () => {
+  const blob = new Blob([JSON.stringify(serialize())], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'minecraft_save.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  status('Exported minecraft_save.json');
+};
+document.getElementById('file-import').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try { applySave(JSON.parse(await file.text())); status('Imported ' + file.name); }
+  catch (err) { status('Import failed: ' + err.message); }
+};
+
+setInterval(() => saveTo(AUTOSAVE_KEY), 30000);
+addEventListener('beforeunload', () => saveTo(AUTOSAVE_KEY));
+
+// ---------- main loop ----------
+if (!loadFrom(AUTOSAVE_KEY)) newGame();
+
+let last = performance.now(), healTimer = 0;
+renderer.setAnimationLoop(now => {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  updatePlayer(dt);
+  updateAnimals(dt);
+  updateMining(dt);
+  healTimer += dt;
+  if (healTimer >= 4) { healTimer = 0; if (player.health < MAX_HEALTH) { player.health++; renderHearts(); } }
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
